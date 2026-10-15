@@ -14,16 +14,20 @@ struct XiaomiKeyEvent: Equatable {
 final class XiaomiInputRouter {
     private let emulator: CodexEmulator
     private let mapping: [String: XiaomiBinding?]
+    private let agentSwitch: AgentSwitchState
     private var pressed: [String: XiaomiBinding] = [:]
 
-    init(emulator: CodexEmulator, mapping: [String: XiaomiBinding?] = XiaomiKeyMapping.defaults) {
+    init(emulator: CodexEmulator, mapping: [String: XiaomiBinding?] = XiaomiKeyMapping.defaults,
+         agentSwitch: AgentSwitchState = AgentSwitchState()) {
         self.emulator = emulator
         self.mapping = mapping
+        self.agentSwitch = agentSwitch
     }
 
     @discardableResult
     func handle(_ event: XiaomiKeyEvent) -> Bool {
-        guard let configured = mapping[event.key], let binding = configured else { return false }
+        // Releases use the target captured at press, even if the cursor has moved.
+        guard let binding = pressed[event.key] ?? agentSwitch.binding(for: event.key) ?? mapping[event.key].flatMap({ $0 }) else { return false }
         let held = pressed[event.key] != nil
 
         switch event.action {
@@ -43,6 +47,7 @@ final class XiaomiInputRouter {
             } else {
                 let action = binding.kind == .rotate ? CodexProtocol.Action.rotate : CodexProtocol.Action.press
                 emulator.sendKey(binding.keycode ?? "", action: action, agent: binding.agent)
+                if let agent = binding.agent { agentSwitch.record(agent) }
             }
         case .repeat:
             guard held else { return false }

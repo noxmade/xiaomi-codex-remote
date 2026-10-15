@@ -121,12 +121,12 @@ struct MainWindow: View {
                     .padding(28)
             }
         case .keyMapping:
-            KeyMappingPage(state: state)
-                .frame(maxWidth: 750, alignment: .leading)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .padding(.horizontal, 28)
-                .padding(.top, 28)
-                .clipped()
+            ScrollView {
+                KeyMappingPage(state: state)
+                    .frame(maxWidth: 750, alignment: .leading)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                    .padding(28)
+            }
         case .permissions:
             ScrollView {
                 permissionsPage
@@ -211,8 +211,8 @@ struct MainWindow: View {
 
                 HStack(alignment: .top) {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("音量拦截")
-                        Text("开启后，按遥控器的音量键不会改变 Mac 系统的音量。")
+                        Text("遥控器按键拦截")
+                        Text("屏蔽音量、电源和菜单键的系统事件，保留遥控器在 APP 中的操作。")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
@@ -343,7 +343,7 @@ struct MainWindow: View {
                         permissionRow(
                             icon: "hand.point.up.left",
                             title: "辅助功能（可选）",
-                            detail: "启用音量拦截时使用，避免遥控器音量键同时改变 Mac 系统音量。",
+                            detail: "启用按键拦截时使用，避免音量、电源和菜单键同时触发系统操作。",
                             granted: state.accessibilityGranted,
                             status: state.accessibilityGranted ? "已允许" : "未允许",
                             actionTitle: state.accessibilityGranted ? "打开系统设置" : "请求权限",

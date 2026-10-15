@@ -7,15 +7,18 @@ final class NativeCodexBridge {
     enum State: Equatable { case stopped, starting, running, failed(String) }
     private(set) var state: State = .stopped
     private(set) var shimConnected = false
+    let agentSwitch: AgentSwitchState
     let socketPath: String
     var onLogLine: ((String) -> Void)?
     var onShimConnectionChange: ((Bool) -> Void)?
     @ObservationIgnored private let server: CodexSocketServer
     @ObservationIgnored private let emulator = CodexEmulator()
-    @ObservationIgnored private lazy var router = XiaomiInputRouter(emulator: emulator)
+    @ObservationIgnored private lazy var router = XiaomiInputRouter(emulator: emulator, agentSwitch: agentSwitch)
     @ObservationIgnored private var reassembler = CodexFrameReassembler()
 
-    init(socketPath: String = ChatGPTShimConfiguration.socketPath) {
+    init(socketPath: String = ChatGPTShimConfiguration.socketPath,
+         agentSwitch: AgentSwitchState = AgentSwitchState()) {
+        self.agentSwitch = agentSwitch
         self.socketPath = socketPath
         server = CodexSocketServer(path: socketPath)
         server.onFrame = { [weak self] frame in self?.receive(frame) }
@@ -70,8 +73,26 @@ final class NativeCodexBridge {
     func applyKeyMapping(_ mapping: [String: XiaomiBinding?]) {
         dispatchPrecondition(condition: .onQueue(.main))
         router.releaseAll()
-        router = XiaomiInputRouter(emulator: emulator, mapping: mapping)
+        router = XiaomiInputRouter(emulator: emulator, mapping: mapping, agentSwitch: agentSwitch)
     }
+    func setAgentSwitchMode(_ mode: AgentSwitchMode) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        router.releaseAll()
+        agentSwitch.mode = mode
+    }
+
+    @discardableResult
+    func selectAgentSlot(_ slot: Int) -> Bool {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard state == .running, shimConnected, (0..<6).contains(slot) else { return false }
+        router.releaseAll()
+        let key = CodexProtocol.Key.agents[slot]
+        emulator.sendKey(key, action: CodexProtocol.Action.press, agent: slot)
+        emulator.sendKey(key, action: CodexProtocol.Action.release, agent: slot)
+        agentSwitch.record(slot)
+        return true
+    }
+
     func handle(key: String, action: XiaomiKeyAction) {
         dispatchPrecondition(condition: .onQueue(.main))
         guard state == .running, shimConnected else { return }

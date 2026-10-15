@@ -26,6 +26,25 @@ final class XiaomiCodexRemoteAppDelegate: NSObject, NSApplicationDelegate {
 
         // 4. Start all subsystems
         appState.startAll()
+        DispatchQueue.main.async { [weak self] in self?.presentAudioSetupIfNeeded() }
+    }
+
+    private func presentAudioSetupIfNeeded() {
+        appState.driverManager.refresh()
+        guard AppPreferences.shouldPresentAudioSetup(
+            driverInstalled: appState.driverManager.status == .installed
+        ), let window = mainWindow else { return }
+
+        let alert = NSAlert()
+        alert.messageText = "安装遥控器语音支持"
+        alert.informativeText = "App 已附带 MiCodexRemote 音频驱动，用于将遥控器语音传入 ChatGPT。安装需要管理员授权，并会短暂重启系统音频，可能中断正在播放或录制的声音。\n\n选择稍后安装不影响按键使用，可在“偏好设置 → 遥控器与语音”中安装。驱动为独立 GPLv3 组件，许可和对应源码包含在 App 资源中。"
+        alert.addButton(withTitle: "授权安装")
+        alert.addButton(withTitle: "稍后安装")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.beginSheetModal(for: window) { [weak self] response in
+            UserDefaults.standard.set(true, forKey: AppPreferences.audioSetupPresentedKey)
+            if response == .alertFirstButtonReturn { self?.appState.installDriver() }
+        }
     }
 
     // MARK: - Main Window

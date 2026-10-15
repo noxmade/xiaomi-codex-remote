@@ -16,7 +16,9 @@ struct LogLine: Identifiable {
 @Observable
 final class AppState {
     // Subsystems
-    let bridge = NativeCodexBridge()
+    let bridge = NativeCodexBridge(agentSwitch: AgentSwitchState(
+        mode: AppPreferences.agentSwitchMode(), slot: AppPreferences.lastRequestedAgentSlot()
+    ))
     let chatGPTLauncher = ChatGPTLauncher()
     let hidMonitor = HIDRemoteMonitor()
     let bluetoothBridge: XiaomiBluetoothBridge
@@ -49,6 +51,9 @@ final class AppState {
 
     init() {
         bluetoothBridge = XiaomiBluetoothBridge(audioOutput: audioOutput)
+        bridge.agentSwitch.onSlotChange = { slot in
+            UserDefaults.standard.set(slot, forKey: AppPreferences.lastRequestedAgentSlotKey)
+        }
         bridge.applyKeyMapping(keyMapping)
         setupSubsystems()
         refreshPermissions()
@@ -67,8 +72,8 @@ final class AppState {
         // HID button events
         hidMonitor.onButtonEvent = { [weak self] key, action in
             guard let self else { return }
-            if key == "volume_up" || key == "volume_down" {
-                self.volumeInterceptor.suppressNext(duration: 0.35)
+            if ["volume_up", "volume_down", "power", "menu"].contains(key) {
+                self.volumeInterceptor.suppressNext(key: key, duration: 0.35)
             }
             // IOHID is scheduled on the main run loop. Deliver synchronously
             // so stop/disconnect releases cannot arrive after a restart.
@@ -117,6 +122,9 @@ final class AppState {
             if connected {
                 self?.appendLog(source: "chatgpt", text: "ChatGPT 已连接，遥控支持已就绪")
             }
+        }
+        chatGPTLauncher.onWindowError = { [weak self] message in
+            self?.appendLog(source: "chatgpt", text: message)
         }
     }
 
@@ -307,7 +315,7 @@ final class AppState {
         if !UserDefaults.standard.bool(forKey: AppPreferences.powerLaunchConsentKey) {
             let alert = NSAlert()
             alert.messageText = "使用 Power 键打开 ChatGPT 遥控版？"
-            alert.informativeText = "以后按遥控器 Power 键，会正常退出当前 ChatGPT，自动设置或更新遥控支持，然后打开遥控版。不会强制退出或修改原版。请先保存正在进行的工作。"
+            alert.informativeText = "以后按遥控器 Power 键，已连接时恢复遥控版窗口；运行但未连接时先尝试恢复，必要时请求确认后重启。未运行时会正常退出当前普通版 ChatGPT，自动设置或更新遥控支持，再打开遥控版。不会强制退出或修改原版。请先保存工作。"
             alert.addButton(withTitle: "启用并打开")
             alert.addButton(withTitle: "取消")
             NSApplication.shared.activate(ignoringOtherApps: true)
@@ -319,9 +327,11 @@ final class AppState {
             appendLog(source: "chatgpt", text: "连接服务启动失败，未打开 ChatGPT 遥控版")
             return
         }
-        appendLog(source: "chatgpt", text: "Power：正在设置并打开 ChatGPT 遥控版")
+        appendLog(source: "chatgpt", text: "Power：正在检查遥控版运行与连接状态")
         chatGPTLauncher.launchFromPower(socketPath: bridge.socketPath) { [weak self] result in
-            if case let .failure(error) = result {
+            if case .success = result, let self {
+                self.appendLog(source: "chatgpt", text: "Power：\(self.chatGPTLauncher.powerActionDescription)")
+            } else if case let .failure(error) = result {
                 self?.appendLog(source: "chatgpt", text: "Power 启动失败：\(error.localizedDescription)")
             }
         }
@@ -340,6 +350,11 @@ final class AppState {
                 self.appendLog(source: "audio", text: "驱动安装失败: \(message)")
             }
         }
+    }
+
+    func setAgentSwitchMode(_ mode: AgentSwitchMode) {
+        bridge.setAgentSwitchMode(mode)
+        UserDefaults.standard.set(mode.rawValue, forKey: AppPreferences.agentSwitchModeKey)
     }
 
     func saveKeyMapping(_ mapping: [String: XiaomiBinding?]) throws {

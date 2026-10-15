@@ -5,6 +5,24 @@ enum AppPreferences {
     static let hideDockIconKey = "hideDockIcon"
     static let keyMappingKey = "xiaomiKeyMapping"
     static let powerLaunchConsentKey = "powerLaunchConsent"
+    static let audioSetupPresentedKey = "audioSetupPresented"
+
+    static let agentSwitchModeKey = "agentSwitchMode"
+    static let lastRequestedAgentSlotKey = "lastRequestedAgentSlot"
+
+    static func agentSwitchMode(in defaults: UserDefaults = .standard) -> AgentSwitchMode {
+        AgentSwitchMode(rawValue: defaults.string(forKey: agentSwitchModeKey) ?? "") ?? .fixed
+    }
+
+    static func lastRequestedAgentSlot(in defaults: UserDefaults = .standard) -> Int {
+        guard let slot = defaults.object(forKey: lastRequestedAgentSlotKey) as? Int,
+              (0..<6).contains(slot) else { return 0 }
+        return slot
+    }
+
+    static func shouldPresentAudioSetup(driverInstalled: Bool, in defaults: UserDefaults = .standard) -> Bool {
+        !driverInstalled && !defaults.bool(forKey: audioSetupPresentedKey)
+    }
 
     static func hideDockIcon(in defaults: UserDefaults = .standard) -> Bool {
         defaults.bool(forKey: hideDockIconKey)

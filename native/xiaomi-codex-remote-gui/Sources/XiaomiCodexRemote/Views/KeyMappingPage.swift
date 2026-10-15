@@ -258,6 +258,29 @@ struct KeyMappingPage: View {
 
             Divider()
 
+            VStack(alignment: .leading, spacing: 6) {
+                Picker("任务切换", selection: Binding(
+                    get: { state.bridge.agentSwitch.mode },
+                    set: { state.setAgentSwitchMode($0) }
+                )) {
+                    Text("固定绑定").tag(AgentSwitchMode.fixed)
+                    Text("循环切换").tag(AgentSwitchMode.cycle)
+                }
+                if state.bridge.agentSwitch.mode == .cycle {
+                    Text("Home：上一槽位 · 菜单：下一槽位")
+                    Text("循环位置：AG0\(state.bridge.agentSwitch.slot)")
+                    Menu("重新定位") {
+                        ForEach(0..<6, id: \.self) { slot in
+                            Button("AG0\(slot)") { state.bridge.selectAgentSlot(slot) }
+                        }
+                    }
+                    .disabled(!state.bridge.shimConnected || state.bridge.state != .running)
+                    Text("记录最后请求的位置；鼠标切换不会同步。固定绑定已保留，重连不自动切换。")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .font(.caption)
+
             VStack(alignment: .leading, spacing: 10) {
                 Text("固定按键").font(.subheadline.weight(.semibold))
                 Label("Power：打开 ChatGPT 遥控版", systemImage: "power")
@@ -491,9 +514,18 @@ struct KeyMappingPage: View {
     }
 
     private func remoteHotspot(_ keyID: String) -> some View {
-        let configured = keyID == "power" || binding(for: keyID) != nil
+        let cycling = state.bridge.agentSwitch.mode == .cycle && ["home", "menu"].contains(keyID)
+        let configured = cycling || keyID == "power" || binding(for: keyID) != nil
         let outline = RemoteKeyOutlineShape(keyID: keyID)
         return Button {
+            if cycling {
+                let alert = NSAlert()
+                alert.messageText = keyID == "home" ? "上一槽位" : "下一槽位"
+                alert.informativeText = "循环切换已开启。原有固定绑定已保留，切回固定绑定模式后可编辑。"
+                alert.addButton(withTitle: "好")
+                alert.runModal()
+                return
+            }
             if keyID == "power" {
                 let alert = NSAlert()
                 alert.messageText = "打开 ChatGPT 遥控版"
@@ -515,8 +547,8 @@ struct KeyMappingPage: View {
         ))
         .frame(width: Self.remoteDisplaySize.width, height: Self.remoteDisplaySize.height)
         .offset(y: -1)
-        .help(keyID == "power" ? "Power · 打开 ChatGPT 遥控版（固定）" : "\(remoteKeyTitle(keyID)) · \(bindingTitle(binding(for: keyID)))")
-        .accessibilityLabel(keyID == "power" ? "Power，打开 ChatGPT 遥控版，固定" : "\(remoteKeyTitle(keyID))，\(bindingTitle(binding(for: keyID)))")
+        .help(cycling ? (keyID == "home" ? "上一槽位" : "下一槽位") : keyID == "power" ? "Power · 打开 ChatGPT 遥控版（固定）" : "\(remoteKeyTitle(keyID)) · \(bindingTitle(binding(for: keyID)))")
+        .accessibilityLabel(cycling ? (keyID == "home" ? "上一槽位" : "下一槽位") : keyID == "power" ? "Power，打开 ChatGPT 遥控版，固定" : "\(remoteKeyTitle(keyID))，\(bindingTitle(binding(for: keyID)))")
     }
 
     private func targetButton(_ target: BindingTarget, session: BindingEditorSession) -> some View {

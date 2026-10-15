@@ -68,7 +68,7 @@ public final class DriverManager {
 
         guard let sourcePath = bundledDriverPath() else {
             status = .failed("未找到驱动文件")
-            completion(false, "未找到驱动文件，请先运行 npm run build:audio")
+            completion(false, "App 中缺少音频驱动，请重新下载完整安装包")
             return
         }
 
@@ -77,17 +77,7 @@ public final class DriverManager {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             // Build a shell script that copies the driver, sets permissions,
             // and restarts coreaudiod.
-            let dest = Self.installedPath
-            let script = """
-            rm -rf '\(dest)' && \
-            cp -R '\(sourcePath)' '\(dest)' && \
-            chown -R root:wheel '\(dest)' && \
-            find '\(dest)' -type d -exec chmod 755 {} \\; && \
-            find '\(dest)' -type f -exec chmod 644 {} \\; && \
-            chmod 755 '\(dest)/Contents/MacOS/MiCodexRemote2ch' && \
-            killall coreaudiod 2>/dev/null; \
-            echo 'DRIVER_INSTALL_OK'
-            """
+            let script = Self.installScript(sourcePath: sourcePath)
 
             let (ok, message) = self?.runPrivileged(script: script) ?? (false, "管理器已释放")
 
@@ -96,7 +86,8 @@ public final class DriverManager {
                     // Wait a moment for coreaudiod to restart and re-enumerate devices
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
                         self?.refresh()
-                        completion(true, "驱动安装成功")
+                        let installed = self?.status == .installed
+                        completion(installed, installed ? "驱动安装成功" : "安装后未找到驱动，请重试")
                     }
                 } else {
                     self?.status = .failed(message)
@@ -104,6 +95,25 @@ public final class DriverManager {
                 }
             }
         }
+    }
+
+    static func installScript(sourcePath: String) -> String {
+        func quote(_ path: String) -> String {
+            "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        }
+        let dest = quote(installedPath)
+        return """
+        set -e
+        mkdir -p \(dest)
+        cp -R \(quote(sourcePath + "/.")) \(dest)
+        chown -R root:wheel \(dest)
+        find \(dest) -type d -exec chmod 755 {} \\;
+        find \(dest) -type f -exec chmod 644 {} \\;
+        chmod 755 \(quote(installedPath + "/Contents/MacOS/MiCodexRemote2ch"))
+        codesign --verify --deep --strict \(dest)
+        (killall coreaudiod 2>/dev/null || true)
+        echo 'DRIVER_INSTALL_OK'
+        """
     }
 
     /// Run a shell script with admin privileges via AppleScript `do shell script … with administrator privileges`.
@@ -124,6 +134,6 @@ public final class DriverManager {
         if output.contains("DRIVER_INSTALL_OK") {
             return (true, "OK")
         }
-        return (true, "OK")
+        return (false, "驱动安装未完成，请重试")
     }
 }

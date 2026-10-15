@@ -1,6 +1,27 @@
 import AppKit
 import Foundation
 
+enum PowerLaunchDecision: Equatable {
+    case ignore, restoreWindow, reopenAndWait, confirmRestart, prepareAndLaunch, unavailable
+
+    static func make(remoteRunning: Bool, connected: Bool,
+                     compatibility: ChatGPTCompatibilityState, busy: Bool,
+                     reconnectTimedOut: Bool) -> Self {
+        if busy { return .ignore }
+        if remoteRunning && connected { return .restoreWindow }
+        if compatibility == .sourceMissing {
+            return remoteRunning ? .reopenAndWait : .unavailable
+        }
+        if remoteRunning {
+            if case .ready = compatibility {
+                return reconnectTimedOut ? .confirmRestart : .reopenAndWait
+            }
+            return .confirmRestart
+        }
+        return .prepareAndLaunch
+    }
+}
+
 enum RemoteLaunchPreparation {
     static func run(stopHost: () throws -> Void,
                     inspect: () -> ChatGPTCompatibilityState,
@@ -24,6 +45,16 @@ final class ChatGPTLauncher {
     private(set) var compatibilityState: ChatGPTCompatibilityState = .checking
     private(set) var launchState: ChatGPTLaunchState = .idle
     private(set) var powerLaunchInProgress = false
+    private(set) var powerActionDescription = ""
+    private(set) var reconnectTimedOut = false
+    private var connectionAttempt = UUID()
+    private var restoreAfterConnect = false
+    private var windowRequest = UUID()
+    var onWindowError: ((String) -> Void)?
+    private let runningRemoteOverride: (() -> Bool)?
+    private let reopenRemoteOverride: ((URL, @escaping (Result<Void, Error>) -> Void) -> Void)?
+    private let connectionTimeout: TimeInterval
+    private let confirmRestartOverride: (() -> Bool)?
     let compatibilityManager: ChatGPTCompatibilityManager
 
     var chatGPTPath: String? {
@@ -35,8 +66,16 @@ final class ChatGPTLauncher {
         resourceURL: URL? = Bundle.main.resourceURL,
         officialAppURL: URL? = nil,
         patchedAppURL: URL? = nil,
-        compatibilityManager: ChatGPTCompatibilityManager? = nil
+        compatibilityManager: ChatGPTCompatibilityManager? = nil,
+        runningRemote: (() -> Bool)? = nil,
+        reopenRemote: ((URL, @escaping (Result<Void, Error>) -> Void) -> Void)? = nil,
+        connectionTimeout: TimeInterval = 10,
+        confirmRestart: (() -> Bool)? = nil
     ) {
+        self.runningRemoteOverride = runningRemote
+        self.reopenRemoteOverride = reopenRemote
+        self.connectionTimeout = connectionTimeout
+        self.confirmRestartOverride = confirmRestart
         self.compatibilityManager = compatibilityManager ?? ChatGPTCompatibilityManager(
             resourceURL: resourceURL,
             officialAppURL: officialAppURL,
@@ -96,18 +135,16 @@ final class ChatGPTLauncher {
     }
 
     func launch(socketPath: String, stopExistingHost: Bool = true, completion: @escaping (Result<Void, Error>) -> Void) {
+        if launchState == .connected && managedRemoteIsRunning {
+            reopenRemoteWindow(completion: completion)
+            return
+        }
         guard case .ready = compatibilityState else {
             completion(.failure(ChatGPTCompatibilityError.verificationFailed("请先准备或修复遥控支持")))
             return
         }
-        if launchState == .connected,
-           let running = NSRunningApplication.runningApplications(
-               withBundleIdentifier: ChatGPTShimConfiguration.bundleIdentifier
-           ).first(where: { !$0.isTerminated }) {
-            running.activate(options: [.activateAllWindows])
-            completion(.success(()))
-            return
-        }
+        connectionAttempt = UUID()
+        reconnectTimedOut = false
         launchState = .launching
         let appURL = compatibilityManager.patchedAppURL
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -134,12 +171,68 @@ final class ChatGPTLauncher {
     }
 
     func launchFromPower(socketPath: String, completion: @escaping (Result<Void, Error>) -> Void) {
-        guard !powerLaunchInProgress, compatibilityState != .preparing,
-              launchState != .launching, launchState != .waitingForShim else { return }
-        if launchState == .connected {
-            launch(socketPath: socketPath, completion: completion)
+        let busy = powerLaunchInProgress || compatibilityState == .preparing
+            || launchState == .launching || launchState == .waitingForShim
+        guard !busy else { return }
+        // Re-read disk and process state; cached connection state alone is insufficient.
+        compatibilityState = compatibilityManager.inspect()
+        let decision = PowerLaunchDecision.make(
+            remoteRunning: managedRemoteIsRunning, connected: launchState == .connected,
+            compatibility: compatibilityState, busy: busy, reconnectTimedOut: reconnectTimedOut
+        )
+        switch decision {
+        case .ignore: return
+        case .unavailable:
+            powerActionDescription = "未找到官方 ChatGPT，无法准备遥控版"
+            launchState = .failed(message: powerActionDescription)
+            completion(.failure(ChatGPTCompatibilityError.invalidSource(powerActionDescription)))
             return
+        case .restoreWindow, .reopenAndWait:
+            powerActionDescription = decision == .restoreWindow
+                ? "恢复遥控版窗口，不退出当前应用" : "重新打开遥控版窗口，等待连接恢复"
+            powerLaunchInProgress = true
+            restoreAfterConnect = false
+            connectionAttempt = UUID()
+            if decision == .reopenAndWait {
+                launchState = .waitingForShim
+                scheduleConnectionTimeout()
+            }
+            reopenRemoteWindow { [weak self] result in
+                guard let self else { return }
+                if case let .failure(error) = result {
+                    self.powerLaunchInProgress = false
+                    self.connectionAttempt = UUID()
+                    // A window error does not invalidate a healthy socket connection.
+                    if self.launchState != .connected {
+                        self.launchState = .failed(message: error.localizedDescription)
+                    }
+                } else if decision == .restoreWindow || self.launchState == .connected {
+                    self.powerLaunchInProgress = false
+                }
+                completion(result)
+            }
+            return
+        case .confirmRestart:
+            powerLaunchInProgress = true
+            let confirmed = confirmRestartOverride?() ?? Self.confirmRemoteRestart()
+            powerLaunchInProgress = false
+            guard confirmed else {
+                powerActionDescription = "已取消重新启动，保留当前应用"
+                completion(.success(()))
+                return
+            }
+            // A connection can recover while the confirmation dialog is open.
+            if launchState == .connected && managedRemoteIsRunning {
+                launchFromPower(socketPath: socketPath, completion: completion)
+                return
+            }
+        case .prepareAndLaunch: break
         }
+        // A stale .connected flag must never short-circuit a fresh launch.
+        launchState = .idle
+        powerActionDescription = "准备并启动 ChatGPT 遥控版"
+        reconnectTimedOut = false
+        restoreAfterConnect = true
         powerLaunchInProgress = true
         compatibilityState = .preparing
         let manager = compatibilityManager
@@ -154,7 +247,10 @@ final class ChatGPTLauncher {
                     guard let self else { return }
                     self.compatibilityState = manager.inspect()
                     self.launch(socketPath: socketPath, stopExistingHost: false) { result in
-                        if case .failure = result { self.powerLaunchInProgress = false }
+                        if case .failure = result {
+                            self.powerLaunchInProgress = false
+                            self.restoreAfterConnect = false
+                        }
                         completion(result)
                     }
                 }
@@ -162,21 +258,84 @@ final class ChatGPTLauncher {
                 DispatchQueue.main.async {
                     guard let self else { return }
                     self.powerLaunchInProgress = false
-                    self.compatibilityState = .failed(message: error.localizedDescription)
+                    self.restoreAfterConnect = false
+                    // Failure to quit is a launch failure, not broken compatibility.
+                    self.compatibilityState = manager.inspect()
+                    self.launchState = .failed(message: error.localizedDescription)
                     completion(.failure(error))
                 }
             }
         }
     }
 
+    static func isManagedApp(_ candidate: URL?, at managed: URL) -> Bool {
+        guard let candidate else { return false }
+        return candidate.resolvingSymlinksInPath().standardizedFileURL
+            == managed.resolvingSymlinksInPath().standardizedFileURL
+    }
+
+    private static func confirmRemoteRestart() -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "重新启动 ChatGPT 遥控版？"
+        alert.informativeText = "遥控版正在运行，但连接未恢复或遥控支持需要更新、修复。继续会正常退出当前 ChatGPT，必要时更新遥控支持，再重新打开。请先保存工作；退出失败不会强制关闭。"
+        alert.addButton(withTitle: "退出并重新打开")
+        alert.addButton(withTitle: "取消")
+        NSApp.activate(ignoringOtherApps: true)
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    private var managedRemoteIsRunning: Bool {
+        if let runningRemoteOverride { return runningRemoteOverride() }
+        return NSRunningApplication.runningApplications(
+            withBundleIdentifier: ChatGPTShimConfiguration.bundleIdentifier
+        ).contains { !$0.isTerminated && Self.isManagedApp($0.bundleURL, at: compatibilityManager.patchedAppURL) }
+    }
+
+    static func reopenConfiguration() -> NSWorkspace.OpenConfiguration {
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        configuration.hides = false
+        configuration.createsNewApplicationInstance = false
+        configuration.allowsRunningApplicationSubstitution = false
+        return configuration
+    }
+
+    private func reopenRemoteWindow(completion: @escaping (Result<Void, Error>) -> Void) {
+        let url = compatibilityManager.patchedAppURL
+        let request = UUID()
+        windowRequest = request
+        let finish: (Result<Void, Error>) -> Void = { [weak self] result in
+            guard self?.windowRequest == request else { return }
+            completion(result)
+        }
+        if let reopenRemoteOverride {
+            reopenRemoteOverride(url, finish)
+            return
+        }
+        NSWorkspace.shared.openApplication(at: url, configuration: Self.reopenConfiguration()) { app, error in
+            DispatchQueue.main.async {
+                if let error { finish(.failure(error)) }
+                else if app != nil { finish(.success(())) }
+                else { finish(.failure(ChatGPTCompatibilityError.commandFailed("未能重新打开遥控版窗口"))) }
+            }
+        }
+    }
+
     func shimConnectionChanged(_ connected: Bool) {
         if connected {
+            connectionAttempt = UUID()
+            reconnectTimedOut = false
             launchState = .connected
             if powerLaunchInProgress {
                 powerLaunchInProgress = false
-                NSRunningApplication.runningApplications(
-                    withBundleIdentifier: ChatGPTShimConfiguration.bundleIdentifier
-                ).first(where: { !$0.isTerminated })?.activate(options: [.activateAllWindows])
+                if restoreAfterConnect {
+                    restoreAfterConnect = false
+                    reopenRemoteWindow { [weak self] result in
+                        if case let .failure(error) = result {
+                            self?.onWindowError?("遥控已连接，但恢复窗口失败：\(error.localizedDescription)")
+                        }
+                    }
+                }
             }
         } else if launchState == .connected {
             launchState = .failed(message: "ChatGPT 连接已断开")
@@ -184,10 +343,17 @@ final class ChatGPTLauncher {
     }
 
     private func scheduleConnectionTimeout() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
-            guard let self, self.launchState == .waitingForShim else { return }
+        let attempt = connectionAttempt
+        DispatchQueue.main.asyncAfter(deadline: .now() + connectionTimeout) { [weak self] in
+            guard let self, self.connectionAttempt == attempt,
+                  self.launchState == .waitingForShim else { return }
             self.powerLaunchInProgress = false
-            self.launchState = .failed(message: "ChatGPT 遥控版已打开，但未在 10 秒内连接")
+            self.restoreAfterConnect = false
+            self.reconnectTimedOut = true
+            let message = self.compatibilityState == .sourceMissing
+                ? "已请求打开遥控版窗口，但连接未恢复。缺少官方 ChatGPT，暂不能重建遥控支持；当前应用不会被退出。"
+                : "遥控版窗口已请求打开，但连接未恢复。再次按 Power 可确认重新启动；请先保存工作。"
+            self.launchState = .failed(message: message)
         }
     }
 

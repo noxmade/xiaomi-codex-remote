@@ -3,6 +3,23 @@ import XCTest
 @testable import XiaomiCodexRemote
 
 final class AppPreferencesTests: XCTestCase {
+    func testDriverInstallScriptQuotesPathsAndStopsBeforeSuccessOnFailure() {
+        let script = DriverManager.installScript(sourcePath: "/Applications/Once's App.app/driver")
+        XCTAssertTrue(script.hasPrefix("set -e\n"))
+        XCTAssertTrue(script.contains("'/Applications/Once'\\''s App.app/driver/.'"))
+        XCTAssertFalse(script.contains("rm -rf"))
+        XCTAssertTrue(script.contains("codesign --verify --deep --strict"))
+        XCTAssertTrue(script.hasSuffix("echo 'DRIVER_INSTALL_OK'"))
+    }
+    func testAudioSetupOnlyPromptsOnceAndSkipsInstalledDriver() {
+        let suiteName = "AudioSetupTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        XCTAssertTrue(AppPreferences.shouldPresentAudioSetup(driverInstalled: false, in: defaults))
+        XCTAssertFalse(AppPreferences.shouldPresentAudioSetup(driverInstalled: true, in: defaults))
+        defaults.set(true, forKey: AppPreferences.audioSetupPresentedKey)
+        XCTAssertFalse(AppPreferences.shouldPresentAudioSetup(driverInstalled: false, in: defaults))
+    }
     func testPowerCannotRestoreAnOldMicroBinding() throws {
         let mapping = try XiaomiKeyMapping.make(overrides: [
             "power": .some(.init(kind: .key, keycode: "ACT06", agent: nil, angle: nil))

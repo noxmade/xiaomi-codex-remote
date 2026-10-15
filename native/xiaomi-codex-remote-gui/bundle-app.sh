@@ -40,15 +40,8 @@ xattr -c "$RESOURCES_DIR/XiaomiRemote.png"
 cp "$SCRIPT_DIR/Resources/CodexMicro.png" "$RESOURCES_DIR/CodexMicro.png"
 xattr -c "$RESOURCES_DIR/CodexMicro.png"
 
-# Bundle the virtual audio driver if it has been built
-DRIVER_SRC="$SCRIPT_DIR/../XiaomiCodexRemoteAudio/MiCodexRemote2ch.driver"
-if [ -d "$DRIVER_SRC" ]; then
-  echo "Bundling MiCodexRemote2ch.driver into Resources..."
-  rm -rf "$RESOURCES_DIR/MiCodexRemote2ch.driver"
-  cp -R "$DRIVER_SRC" "$RESOURCES_DIR/MiCodexRemote2ch.driver"
-else
-  echo "Warning: MiCodexRemote2ch.driver not found. Run 'npm run build:audio' first to bundle the driver."
-fi
+# Always include the driver, GPL notices and exact corresponding source.
+bash "$SCRIPT_DIR/../XiaomiCodexRemoteAudio/bundle-driver.sh" "$RESOURCES_DIR"
 
 echo "Compiling Icon Composer app icon..."
 if [ ! -d "$ICON_SOURCE" ]; then

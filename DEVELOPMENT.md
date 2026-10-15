@@ -43,7 +43,7 @@ ad-hoc 签名不能保留 OpenAI 团队专属的 application identifier、applic
 
 GUI 以 `CFBundleVersion` 区分需要设置和需要更新，以 bundle 内容、显示名、fuse、启动环境及签名策略区分需要修复。启动动作进入等待状态，只有 `CodexSocketServer` 的真实连接回调才能把状态改为“已连接”。从 Dock 启动依赖遥控版 `Info.plist` 中持久化的 `LSEnvironment`，不是 GUI 进程临时传入的环境变量。
 
-GUI 的 Power 键是固定启动操作，不进入 Micro 路由。首次确认持久化用户同意，后续按键自动正常退出正在运行的 ChatGPT、按需准备副本、启动并等待连接；已连接时激活窗口，退出失败不会强制终止。整个操作防止重复进入。CLI 的 Power 默认仍未绑定且允许覆盖；语音协调和线协议不受此次修改影响。
+GUI 的 Power 键是固定启动操作，不进入 Micro 路由。首次确认持久化用户同意，之后每次读取副本状态，并按实际 bundle 路径识别运行中的遥控版，不能仅以共用的 bundle identifier 判断。已连接时通过 `NSWorkspace.openApplication` 请求重新打开窗口，禁用运行实例路径替换，不重启或更新当前可用会话；未连接的可用实例先重新打开并等待 10 秒，超时不退出，下一次按键才确认重启。需更新、修复的未连接实例先确认，再正常退出并准备副本；取消或退出失败不会继续。等待期间的重复按键被忽略，超时回调用请求标识隔离，确认期间恢复连接则改为恢复窗口。未运行时按需准备并启动；缺少官方应用时不能重建，但运行中的遥控版仍可重新打开。CLI 的 Power 默认仍未绑定且允许覆盖；语音协调和线协议不变。
 
 ## 输入源契约
 
@@ -87,7 +87,9 @@ PATH=/usr/bin:/bin "native/xiaomi-codex-remote-gui/Xiaomi Codex Remote.app/Conte
 
 Swift 包声明工具版本为 5.9；完整应用打包还需要支持当前 Icon Composer `.icon` 资源的 Xcode `actool`。`bundle-app.sh` 自行构建 release 二进制，`RELEASE_UNIVERSAL=1` 可生成 arm64 / x86_64 通用包。脚本根据 `package.json` 写入应用版本，使用 ad-hoc 签名，不执行正式签名或公证；公开分发建议另外完成这两项。
 
-v0.3.0 发布附件不内置音频驱动。源码打包时，脚本会复制已有的 `native/XiaomiCodexRemoteAudio/MiCodexRemote2ch.driver`；不能假定所有本地打包结果都不含驱动。驱动构建脚本下载并修改 BlackHole v0.7.1，第三方源码适用其独立的 [GPLv3 许可](https://github.com/ExistentialAudio/BlackHole/blob/v0.7.1/LICENSE)，不是本项目 MIT 许可覆盖的代码。
+此前 v0.3.0 / v0.3.1 发布附件不内置音频驱动。当前打包脚本必须携带驱动、对应源码包、许可、修改声明和校验清单；缺少产物则自动构建，失败会停止打包。驱动构建需要网络和 Xcode，下载并修改 BlackHole v0.7.1，其独立的 [GPLv3 许可](https://github.com/ExistentialAudio/BlackHole/blob/v0.7.1/LICENSE) 不属于主程序 MIT 许可。`MiCodexRemote-source.tar.gz` 包含实际修改后的源码及构建、安装脚本，可按其中 README 使用本地源码重建；发布时应同时提供该源码包，并明确 GPL 组件边界。
+
+首次启动安装引导使用 `audioSetupPresented` 偏好记录，不在已安装或用户已经选择后重复弹出；稍后可通过偏好设置手动安装。测试不执行管理员安装、不重启 CoreAudio；安装取消、授权失败、设备重新枚举及 RC003 语音仍需人工验收。
 
 `shim/patch-app.sh` 和 `shim/launch-chatgpt.sh` 是需要 Node.js 的开发回退方式，检查能力不等同于原生 GUI。启动脚本会尝试退出正在运行的 ChatGPT；运行前需保存工作，并明确指定已准备的兼容副本。不要把这些脚本作为无需确认的测试步骤。
 
@@ -111,3 +113,7 @@ v0.3.0 发布附件不内置音频驱动。源码打包时，脚本会复制已�
 3. 目标 macOS 与桌面宿主版本的枚举和 RPC 兼容性；
 4. 语音协商、连续音频、异常恢复和虚拟音频路由；
 5. 验证所使用的 macOS、ChatGPT、RC003 固件与虚拟音频设备版本。
+
+## v0.3.2 循环切换与系统按键拦截
+
+`AgentSwitchState` 由原生桥接持有，输入路由重建时保留游标。模式与最后请求槽位通过 UserDefaults 保存；游标不代表宿主已确认的当前任务。断开只清理按住状态，不自动重选。`RemoteKeyInterceptionTests` 验证系统事件筛选、独立窗口、超时与停止清理；`AgentSwitchTests` 验证循环、模式切换和 socket 重连。系统拦截与真实遥控器仍需实机验收，不从单元测试推断兼容性。
